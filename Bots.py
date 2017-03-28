@@ -2,6 +2,7 @@ import math
 import random
 import numpy as np
 
+from FFModel import FFModel
 from Game import *
 
 
@@ -11,7 +12,7 @@ class Bot:
         self.Theta1 = Theta1
         self.Theta2 = Theta2
         self.game = game
-
+        self.model = FFModel(11)
 
         
     def Sigmoid(self, x):
@@ -19,49 +20,50 @@ class Bot:
 
     
     
-    def PreProcess(self, action):
+    def PreProcess(self):
         # Use the relative coordinates of the falling objects to generate the input numpy vector the neural network (exploit game symmetry to use only one net)
         state_new = []
         for aster in self.game.asteroids:          # Scaling input values
             state_new.append(aster[0]/(self.game.Halfwidth+0.0))
             state_new.append(aster[1]/(self.game.Height+0.0))
-        state_new.append(1)     # Add the bias term
-        if action == 'L':
-            for i in range(self.game.N):
-                state_new[2*i] *= -1
-        layer1 = np.empty([2*self.game.N+1,1])
-        for i in range(2*self.game.N+1):
-            layer1[i, 0] = state_new[i]
-        return layer1
+        #state_new.append(1)     # Add the bias term
+        #if action == 'L':
+        #    for i in range(self.game.N):
+        #        state_new[2*i] *= -1
+        #layer1 = np.empty([2*self.game.N+1, 1])
+        #for i in range(2*self.game.N):
+        #    layer1[i, 0] = state_new[i]
+        return np.asarray([state_new])
 
     
 
-    def ForwardPropagate(self, action):
+    def ForwardPropagate(self):
         # Evalue the neural network for the current game state with the given L/R action; Returns triple of values/vectors (one for each layer)
-        layer1 = self.PreProcess(action)
-        layer2_temp = np.dot(np.transpose(self.Theta1), layer1)
-        for i in range(layer2_temp.shape[0]):
-            layer2_temp[i,0] = self.Sigmoid(layer2_temp[i,0])
-        layer2 = np.append(layer2_temp, [[1]], axis=0)
-        layer3 = np.dot(np.transpose(self.Theta2), layer2)
-        result = self.Sigmoid(layer3[0,0])
-        return (layer1, layer2, result)
+        state = self.PreProcess()
+        # layer2_temp = np.dot(np.transpose(self.Theta1), layer1)
+        # for i in range(layer2_temp.shape[0]):
+        #     layer2_temp[i,0] = self.Sigmoid(layer2_temp[i,0])
+        # layer2 = np.append(layer2_temp, [[1]], axis=0)
+        # layer3 = np.dot(np.transpose(self.Theta2), layer2)
+        # result = self.Sigmoid(layer3[0,0])
+        predict = self.model.predict(state)
+        self.state = state
+        #return min(max(predict[0], 0), 1), min(max(predict[1], 0), 1)
+        return predict[0], predict[1]
+        #return (layer1, layer2, result)
+
 
 
     
     def TestStep(self):
         # Determines the optimal direction in the next move by using the given Theta1, Theta2 parameters
-        outputL = self.ForwardPropagate('L')
-        outputR = self.ForwardPropagate('R')
-        if outputL[-1] < outputR[-1]:
+        outputL, outputR = self.ForwardPropagate()
+        if outputL < outputR:
             self.game.ChangeDirection('L')
         else:
             self.game.ChangeDirection('R')
         result = self.game.GameOver()
         return result
-
-
-
 
 
 
@@ -91,7 +93,7 @@ class BotTrain(Bot):
 
         self.counter = []    # Container for average and median test scores
         self.best_score = 0    # Best score among all training sessions
-
+        self.batch_size = 10
         
     def BackPropagate(self, output, expected, layer1, layer2):
         # Backpropagation algorithm for neural network; computes the partial derivatives with respect to parameters and performs the stochastic gradient descent
@@ -107,42 +109,79 @@ class BotTrain(Bot):
   
 
             
-    def ReinforcedLearningStep(self):
+    def ReinforcedLearningStep(self, data, labels, explore_change, prev_count, count):
         # Performs one step of reinforcement learning
         t = random.random()
-        if t < 1-self.p:
-            tt = random.random()
-            if tt < self.Inertia:
-                output = self.ForwardPropagate(self.game.Direction)
-            else:
-                new_direction = random.choice(['L','R'])
-                output = self.ForwardPropagate(new_direction)
-                self.game.ChangeDirection(new_direction)
-        else:
-            outputL = self.ForwardPropagate('L')
-            outputR = self.ForwardPropagate('R')
-            if outputL[-1] < outputR[-1]:
+        if t < explore_change:
+            outputL, outputR = self.ForwardPropagate()
+
+#            if random.random() > self.Inertia:
+            new_direction = random.choice(['L', 'R'])
+            if random.random() > 0.1:
+                if self.game.Direction == 'R':
+                    new_direction = 'R'
+                elif self.game.Direction == 'L':
+                    new_direction = 'L'
+                else:
+                    print("error wrong direction")
+
+            self.game.ChangeDirection(new_direction)
+            if new_direction == 'L':
                 output = outputL
+                out_index = 0
+            elif new_direction == 'R':
+                output = outputR
+                out_index = 1
+            else:
+                print "error: invalid direction"
+        else:
+            outputL, outputR = self.ForwardPropagate()
+            output = min(outputL, outputR)
+            out_index = [outputL, outputR].index(output)
+
+            if outputL < outputR:
                 self.game.ChangeDirection('L')
             else:
-                output = outputR
                 self.game.ChangeDirection('R')
-                
+        state = self.state
         if random.random()<0.00002:
             # Occasionally prints out the current value of the network (useful for adjusting various learning parameters, especially gamma)
-            print output[-1]
+            print output
             
         result = self.game.UpdateStep()
-        if result[-1]:
-            estimate = self.GameOverCost
+
+        estimateL, estimateR = self.ForwardPropagate()
+
+        if out_index == 0:
+            estimateL = min(estimateL, estimateR) * 0.99
+            estimateR = outputR
+        elif out_index == 1:
+            estimateL = outputL
+            estimateR = min(estimateL, estimateR) * 0.99
         else:
-            estimateL = self.ForwardPropagate('L')
-            estimateR = self.ForwardPropagate('R')
-            estimate = min(estimateL[-1], estimateR[-1])**self.discount
-            if result[1]:
-                estimate *= self.gamma
-        expected = (1-self.a)*output[-1] + self.a*estimate
-        self.BackPropagate(output[-1], expected, output[0], output[1])
+            print "error out_index"
+        if result[-1]:
+            if out_index == 0:
+                estimateL = self.GameOverCost
+            else:
+                estimateR = self.GameOverCost
+            estimate = self.GameOverCost
+            #estimate = 1 - (float(min(count, prev_count)) / prev_count)
+
+            #if result[1]:
+            #    estimate *= self.gamma
+        #expected = (1-self.a)*output + self.a*estimate
+
+
+        label = np.asarray([estimateL, estimateR])
+
+        if random.random() < 0.002 :
+            print "label : ", label
+
+        data.append(state[0])
+        labels.append(label)
+        #self.model.train(self.state_new, label)
+
         return result
 
     
@@ -150,20 +189,46 @@ class BotTrain(Bot):
     def Training(self):
         # Run NSim consecutive training games
         train_scores = []
+        data = []
+        labels = []
+        print("traning started")
+        prev_count = 1000
         for i in range(self.NSim):
-            stop = False
-            while not stop:
-                (update, kill, stop) = self.ReinforcedLearningStep()
-            train_scores.append(self.game.counter)
-            self.game = Game(**self.GameParameters)
+            explore_change = random.random()/5
+            #print "explore chance: ", explore_change
+            for j in range(self.batch_size):
+                stop = False
+                count = 0
+                step_labels = []
+                while not stop:
+                    count += 1
+                    (update, kill, stop) = self.ReinforcedLearningStep(data, step_labels, explore_change, prev_count, count)
+                new_labels = []
+                #print "new_label: ", step_labels[-1]
+                for idx in range(len(step_labels)):
+                    new_labels.append(step_labels[idx])
+                labels += new_labels
+
+                train_scores.append(self.game.counter)
+                self.game = Game(**self.GameParameters)
+                self.printR("count: " + str(count))
+            self.model.train(data, labels)
+            data = []
+            labels = []
+        print("traning done ")
         return train_scores
 
-            
-            
+    def printR(self, print_str, c=0.02):
+        if random.random() < c:
+            print print_str
+            # prev_count = max(prev_count, count)
+
     def Testing(self):
         # Run NTest consecutive test games to evaluate learned performance; prints out all the test values and records average and median values
         s = 0
         alist = []
+        print("testing started")
+
         for i in range(self.NTest):
             stop = False
             while not stop:
@@ -174,6 +239,7 @@ class BotTrain(Bot):
         m1 = sum(alist)/(len(alist)+0.0)
         m2 = np.median(alist)
         self.counter.append((m1,m2))
+        print("testing done")
         if m1 > self.best_score:
             self.best_score = m1
             np.savez("parameters_best", GameParameters = self.GameParameters, Theta1 = self.Theta1, Theta2 = self.Theta2)
@@ -211,7 +277,3 @@ class BotTrain(Bot):
                     keep_going = False
 
             
-            
-
-
-             

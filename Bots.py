@@ -2,8 +2,11 @@ import math
 import random
 import numpy as np
 
+from Client import send_data
 from FFModel import FFModel
 from Game import *
+from RunningMax import nextRunningMax
+from Server import saveDataAndLabels
 
 
 class Bot:
@@ -93,7 +96,11 @@ class BotTrain(Bot):
 
         self.counter = []    # Container for average and median test scores
         self.best_score = 0    # Best score among all training sessions
-        self.batch_size = 10
+        self.batch_size = 100
+        self.max_data_size = 2000000
+        self.distributed_mode = False
+
+        self.runningMax = 0
         
     def BackPropagate(self, output, expected, layer1, layer2):
         # Backpropagation algorithm for neural network; computes the partial derivatives with respect to parameters and performs the stochastic gradient descent
@@ -109,13 +116,12 @@ class BotTrain(Bot):
   
 
             
-    def ReinforcedLearningStep(self, data, labels, explore_change, prev_count, count):
+    def ReinforcedLearningStep(self, data, labels, explore_change):
         # Performs one step of reinforcement learning
-        t = random.random()
-        if t < explore_change:
-            outputL, outputR = self.ForwardPropagate()
+        outputL, outputR = self.ForwardPropagate()
 
-#            if random.random() > self.Inertia:
+        if random.random() < explore_change:
+            #            if random.random() > self.Inertia:
             new_direction = random.choice(['L', 'R'])
             if random.random() > 0.1:
                 if self.game.Direction == 'R':
@@ -135,7 +141,6 @@ class BotTrain(Bot):
             else:
                 print "error: invalid direction"
         else:
-            outputL, outputR = self.ForwardPropagate()
             output = min(outputL, outputR)
             out_index = [outputL, outputR].index(output)
 
@@ -151,13 +156,17 @@ class BotTrain(Bot):
         result = self.game.UpdateStep()
 
         estimateL, estimateR = self.ForwardPropagate()
+        #print "estimateL ", estimateL
+        #print "estimateR ", estimateR
 
         if out_index == 0:
-            estimateL = min(estimateL, estimateR) * 0.99
+            #estimateL = min(estimateL, estimateR) * 0.99
+            estimateL = outputL + (min(estimateL, estimateR) * 0.99 - outputL)
             estimateR = outputR
         elif out_index == 1:
             estimateL = outputL
-            estimateR = min(estimateL, estimateR) * 0.99
+            #estimateR = min(estimateL, estimateR) * 0.99
+            estimateR = outputR + (min(estimateL, estimateR) * 0.99 - outputR)
         else:
             print "error out_index"
         if result[-1]:
@@ -165,7 +174,7 @@ class BotTrain(Bot):
                 estimateL = self.GameOverCost
             else:
                 estimateR = self.GameOverCost
-            estimate = self.GameOverCost
+            #estimate = self.GameOverCost
             #estimate = 1 - (float(min(count, prev_count)) / prev_count)
 
             #if result[1]:
@@ -173,26 +182,29 @@ class BotTrain(Bot):
         #expected = (1-self.a)*output + self.a*estimate
 
 
-        label = np.asarray([estimateL, estimateR])
+        #label = np.asarray([estimateL, estimateR])
+        estimateL = max(estimateL, 1)
+        estimateR = max(estimateR, 1)
 
-        if random.random() < 0.002 :
-            print "label : ", label
+        if random.random() < 0.0002 :
+            print "label : ", [estimateL, estimateR]
 
-        data.append(state[0])
-        labels.append(label)
+        data.append(state[0].tolist())
+        labels.append([estimateL, estimateR, out_index])
+        #labels.append([random.randint(0,1), random.randint(0,1)])
         #self.model.train(self.state_new, label)
 
         return result
 
     
 
-    def Training(self):
+    def Training(self, data = [], labels = []):
         # Run NSim consecutive training games
         train_scores = []
-        data = []
-        labels = []
+
         print("traning started")
-        prev_count = 1000
+        if self.distributed_mode:
+            self.model = FFModel(11)
         for i in range(self.NSim):
             explore_change = random.random()/5
             #print "explore chance: ", explore_change
@@ -202,19 +214,44 @@ class BotTrain(Bot):
                 step_labels = []
                 while not stop:
                     count += 1
-                    (update, kill, stop) = self.ReinforcedLearningStep(data, step_labels, explore_change, prev_count, count)
-                new_labels = []
-                #print "new_label: ", step_labels[-1]
-                for idx in range(len(step_labels)):
-                    new_labels.append(step_labels[idx])
-                labels += new_labels
+                    (update, kill, stop) = self.ReinforcedLearningStep(data, step_labels, explore_change)
+
 
                 train_scores.append(self.game.counter)
                 self.game = Game(**self.GameParameters)
+                self.runningMax = nextRunningMax(count, self.runningMax)
                 self.printR("count: " + str(count))
-            self.model.train(data, labels)
+                self.printR("runningMax: " + str(self.runningMax))
+
+                new_labels = []
+                for idx in range(len(step_labels)):
+                    index = step_labels[idx][2]
+                    if count > self.runningMax:
+                        if index == 0:
+                            new_labels.append([step_labels[idx][0]*0.8, step_labels[idx][1]])
+                        else:
+                            new_labels.append([step_labels[idx][0], step_labels[idx][1]*0.8])
+
+                    else:
+                        if index == 0:
+                            new_labels.append([step_labels[idx][0] * 1.2, step_labels[idx][1]])
+                        else:
+                            new_labels.append([step_labels[idx][0], step_labels[idx][1] * 1.2])
+
+                labels += new_labels
+            if self.distributed_mode:
+                #send_data([data, labels])
+                saveDataAndLabels(data, labels)
+            else :
+                self.model.train(data, labels)
+                self.model.save()
             data = []
             labels = []
+
+            self.printR("data size: " + str(len(labels)))
+            if len(labels) > self.max_data_size:
+                del data[: len(data) - self.max_data_size]
+                del labels[: len(labels) - self.max_data_size]
         print("traning done ")
         return train_scores
 
@@ -239,6 +276,8 @@ class BotTrain(Bot):
         m1 = sum(alist)/(len(alist)+0.0)
         m2 = np.median(alist)
         self.counter.append((m1,m2))
+        print "Test Results:", self.counter
+
         print("testing done")
         if m1 > self.best_score:
             self.best_score = m1
@@ -252,21 +291,23 @@ class BotTrain(Bot):
         self.Testing()
         keep_going = True
         i = 0
+        data = []
+        labels = []
         while keep_going:
             i += 1
             print
             print "N:", self.game.N
             print "Session:", i
-            train_scores = self.Training()
+            train_scores = self.Training(data, labels)
             print "Train average and median score:", sum(train_scores)/(len(train_scores)+0.0), np.median(train_scores)
-            self.Testing()
-            print "Test Results:", self.counter            
-            new, old = self.counter[-1][-1], self.counter[-2][-1]
-            self.epsilon *= (old/new)**self.epsilon_decay_rate
+            #self.Testing()
+            #print "Test Results:", self.counter
+            #new, old = self.counter[-1][-1], self.counter[-2][-1]
+            #self.epsilon *= (old/new)**self.epsilon_decay_rate
             print "Gradient Learning Rate:", self.epsilon
-            self.p = 1 - (1-self.p)*((old/new)**self.p_decay_rate)
-            if self.p < 0:
-                self.p = 0.0
+            #self.p = 1 - (1-self.p)*((old/new)**self.p_decay_rate)
+            #if self.p < 0:
+            #    self.p = 0.0
             print "p", self.p
             print
             if self.TestTreshold == None and not self.NumberOfSessions == None:

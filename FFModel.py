@@ -1,3 +1,4 @@
+import glob
 import os
 import random
 
@@ -9,15 +10,17 @@ import numpy
 class FFModel():
     def __init__(self, input_size):
 
-        n_hidden_1 = 15  # 1st layer number of features
-        n_hidden_2 = 15  # 2nd layer number of features
+        tf.reset_default_graph()
+
+        n_hidden_1 = 100  # 1st layer number of features
+        n_hidden_2 = 150  # 2nd layer number of features
         n_input = 10
         n_classes = 2
 
         weights = {
             'h1': tf.Variable(tf.random_normal([n_input, n_hidden_1], stddev=0.3)),
             'h2': tf.Variable(tf.random_normal([n_hidden_1, n_hidden_2], stddev=0.3)),
-            'out': tf.Variable(tf.random_normal([n_hidden_1, n_classes], stddev=0.3))
+            'out': tf.Variable(tf.random_normal([n_hidden_2, n_classes], stddev=0.3))
         }
         biases = {
             'b1': tf.Variable(tf.random_normal([n_hidden_1], stddev=0.3)),
@@ -42,7 +45,13 @@ class FFModel():
 
         tf.initialize_all_variables().run(session=self.session)
 
-        #self.saver.restore(self.session, 'model.ckpt')
+        files_path = os.path.join("model", 'model*.ckpt*.index')
+        labels_files = sorted(
+            glob.iglob(files_path), key=os.path.getctime, reverse=True)
+
+        if labels_files:
+            print "loading from ", labels_files[0]
+            self.saver.restore(self.session, labels_files[0].replace(".index", ""))
     def init_weights(self, shape):
         return tf.Variable(tf.random_normal(shape, stddev=0.01))
 
@@ -70,15 +79,18 @@ class FFModel():
         layer_1 = tf.add(tf.matmul(x, weights['h1']), biases['b1'])
         #layer_1 = tf.Print(layer_1, [layer_1], "layer1: ")
         layer_1 = tf.nn.relu(layer_1)
+        #layer_1 = tf.sigmoid(layer_1)
         #layer_1 = tf.Print(layer_1, [layer_1], "relu1: ")
 
         # Hidden layer with RELU activation
         layer_2 = tf.add(tf.matmul(layer_1, weights['h2']), biases['b2'])
+        #layer_2 = tf.sigmoid(layer_2)
         layer_2 = tf.nn.relu(layer_2)
         # Output layer with linear activation
         out_layer = tf.matmul(layer_2, weights['out']) + biases['out']
         #out_layer = tf.Print(out_layer, [out_layer], "out_layer: ")
-        out_layer = tf.sigmoid(out_layer)
+        out_layer = tf.nn.softplus(out_layer)
+        #out_layer = tf.sigmoid(out_layer)
         return out_layer
 
     def training(self, loss, learning_rate):
@@ -105,20 +117,24 @@ class FFModel():
         return loss
 
     def train(self, train_data, labels):
-        for _ in range(1):
+        for i in range(10):
             _, loss_value = self.session.run([self.optimizer, self.loss_function],
                                              feed_dict={self.X: train_data, self.Y: labels})
-        if random.random() < 0.02 :
-            print "loss value: ", loss_value
+            if (i % 100) == 0:
+                print "loss value: ", loss_value
+        print "loss value: ", loss_value
 
-            self.saver.save(self.session, 'model.ckpt')
+            #self.saver.save(self.session, 'model.ckpt')
+
+    def save(self):
+        self.saver.save(self.session, 'model/model' + str(random.randint(0, 1000000)) + '.ckpt')
 
     def predict(self, input):
 
         run = self.session.run([self.pred],
                                feed_dict={self.X: input})
 
-        if random.random() < 0.0002:
+        if random.random() < 0.00002:
             print "output : ", run
 
         return run[0][0]
